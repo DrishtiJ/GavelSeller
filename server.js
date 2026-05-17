@@ -114,10 +114,15 @@ function guessCategory(text) {
 
 // ── Session helpers ───────────────────────────────────────────
 
+function newListingId(conversationId) {
+  return `${conversationId}_${Date.now()}`;
+}
+
 function getSession(conversationId, participant) {
   if (!sessions[conversationId]) {
     sessions[conversationId] = {
       state: "start",
+      listingId: newListingId(conversationId),
       data: { name: null, title: null, description: null, price: null, zip: null, category: null, images: [] },
       participant,
     };
@@ -181,7 +186,7 @@ async function saveToConvex(conversationId, participant, session) {
   const { data } = session;
   try {
     await convex.mutation("listings:upsertListing", {
-      conversationId,
+      conversationId: session.listingId,
       participantNumber: participant,
       ...(data.name && { userName: data.name }),
       ...(data.title && { title: data.title }),
@@ -240,6 +245,7 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
   // "Start over" / "Hi" always resets the session
   if (/^(start over|restart|reset|hi|hello|hey)\.?$/i.test(t) && session.state !== "start") {
     session.state = "start";
+    session.listingId = newListingId(conversationId);
     session.data = { name: null, title: null, description: null, price: null, zip: null, category: null, images: [] };
     await sendMessage(participant, "Hey! Welcome to Gavel 👋 Let's start fresh. What's your first name?");
     await saveToConvex(conversationId, participant, session);
@@ -364,8 +370,8 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
       break;
 
     case "done":
-      // Reset for new listing
       session.state = "ask_name";
+      session.listingId = newListingId(conversationId);
       session.data = { name: null, title: null, description: null, price: null, zip: null, category: null, images: [] };
       reply = "Welcome back! 👋 Let's create a new listing. What's your first name?";
       break;
