@@ -9,7 +9,44 @@ const convex = new ConvexHttpClient("https://marvelous-puma-505.convex.cloud");
 const AGENTPHONE_API_KEY = "sk_live_bo6chz1u3ja0jNfTIs7rd3qOXyKZdBOi";
 const AGENT_ID = "cmpa73n68098ijz00um9mbnxa";
 const NUMBER_ID = "cmp90uxo000p9gd29wei6iofo";
+const GEMINI_API_KEY = "AIzaSyDoKMi3OdRanezFSyJys3KxfKUMOm-Muyw";
 const POLL_INTERVAL_MS = 2500;
+
+async function geminiExtract(prompt) {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 100, temperature: 0 },
+        }),
+      }
+    );
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+  } catch (e) {
+    console.error("Gemini error:", e.message);
+    return null;
+  }
+}
+
+async function extractField(state, userText) {
+  const prompts = {
+    ask_name: `Extract only the first name from this message. Reply with just the name, nothing else.\nMessage: "${userText}"`,
+    ask_item: `Extract a short, clean item title (3-6 words) from this message for a Craigslist listing. Reply with just the title.\nMessage: "${userText}"`,
+    ask_description: `Clean up this item description for a Craigslist listing. Keep it natural but fix any typos. Reply with just the description.\nMessage: "${userText}"`,
+    ask_price: `Extract the price from this message. Format as "$X" or "free". If unclear, reply "unknown".\nMessage: "${userText}"`,
+    ask_zip: `Extract the 5-digit US ZIP code from this message. Reply with just the 5 digits. If none found, reply "unknown".\nMessage: "${userText}"`,
+    confirm_category: `The user is confirming or changing a Craigslist category. Reply with just the category name they want, or "yes" if they confirmed.\nMessage: "${userText}"`,
+  };
+  if (!prompts[state]) return userText;
+  const result = await geminiExtract(prompts[state]);
+  console.log(`Gemini [${state}]: "${userText}" → "${result}"`);
+  return result || userText;
+}
 
 // Track last processed message per conversation
 const lastSeen = {}; // conversationId -> last inbound message receivedAt
@@ -117,32 +154,49 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
       reply = "Hey! Welcome to Gavel 👋 I'm here to help you list your item on Craigslist in just a few steps. What's your first name?";
       break;
 
-    case "ask_name":
-      session.data.name = t.split(" ")[0];
+    case "ask_name": {
+      const name = await extractField("ask_name", t);
+      session.data.name = name;
       session.state = "ask_item";
-      reply = `Nice to meet you, ${session.data.name}! What are you selling today?`;
+      reply = `Nice to meet you, ${name}! What are you selling today?`;
       break;
+    }
 
-    case "ask_item":
-      session.data.title = t;
+    case "ask_item": {
+      const title = await extractField("ask_item", t);
+      session.data.title = title;
       session.state = "ask_description";
-      reply = `Got it — "${t}"! Can you describe it a bit more? Things like condition (new/used), age, brand, and any flaws.`;
+      reply = `Got it — "${title}"! Can you describe it a bit more? Things like condition (new/used), age, brand, and any flaws.`;
       break;
+    }
 
-    case "ask_description":
-      session.data.description = t;
+    case "ask_description": {
+      const desc = await extractField("ask_description", t);
+      session.data.description = desc;
       session.state = "ask_price";
       reply = `Perfect! What price are you asking? (Say "free" if you're giving it away.)`;
       break;
+    }
 
-    case "ask_price":
-      session.data.price = t;
+    case "ask_price": {
+      const price = await extractField("ask_price", t);
+      if (price === "unknown") {
+        reply = `Hmm, I didn't catch a price. Could you say something like "$50" or "free"?`;
+        break;
+      }
+      session.data.price = price;
       session.state = "ask_zip";
       reply = `Got it! What's your ZIP code so buyers know where to find the item?`;
       break;
+    }
 
-    case "ask_zip":
-      session.data.zip = t;
+    case "ask_zip": {
+      const zip = await extractField("ask_zip", t);
+      if (zip === "unknown") {
+        reply = `I didn't catch a ZIP code — could you share your 5-digit ZIP?`;
+        break;
+      }
+      session.data.zip = zip;
       session.state = "ask_images";
       if (session.data.images.length > 0) {
         reply = `Thanks! I already have ${session.data.images.length} photo(s). Send more or type "done" when finished.`;
@@ -150,6 +204,7 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
         reply = `Almost there! Please share at least one photo 📸 Good photos = faster sales. Type "done" when you've sent all your photos.`;
       }
       break;
+    }
 
     case "ask_images":
       if (mediaUrl && !t) {
@@ -170,17 +225,19 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
       }
       break;
 
-    case "confirm_category":
-      if (t.toLowerCase() === "yes") {
+    case "confirm_category": {
+      const catReply = await extractField("confirm_category", t);
+      if (catReply?.toLowerCase() === "yes") {
         session.state = "confirm_summary";
         reply = buildSummary(session);
       } else {
-        const matched = CATEGORIES.find((c) => c.includes(t.toLowerCase())) || t;
+        const matched = CATEGORIES.find((c) => c.includes((catReply || t).toLowerCase())) || catReply || t;
         session.data.category = matched;
         session.state = "confirm_summary";
         reply = buildSummary(session);
       }
       break;
+    }
 
     case "confirm_summary":
       if (/^yes|looks good|good|correct|perfect/i.test(t)) {
@@ -204,7 +261,10 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
       break;
 
     case "done":
-      reply = `Your listing is already saved! Text again anytime to create a new listing. 😊`;
+      // Any message resets for a new listing
+      session.state = "ask_name";
+      session.data = { name: null, title: null, description: null, price: null, zip: null, category: null, images: [] };
+      reply = "Welcome back to Gavel! 👋 Let's create a new listing. What's your first name?";
       break;
 
     default:
@@ -231,6 +291,34 @@ Everything look good? Reply "yes" to confirm or tell me what to change.`;
 }
 
 // ── Polling loop ──────────────────────────────────────────────
+async function initLastSeen() {
+  // Set lastSeen to the latest message in each conversation so we
+  // don't reprocess history on startup
+  try {
+    const res = await fetch("https://api.agentphone.ai/v1/conversations?limit=20", {
+      headers: { Authorization: `Bearer ${AGENTPHONE_API_KEY}` },
+    });
+    const { data: conversations } = await res.json();
+    for (const conv of conversations || []) {
+      const msgRes = await fetch(
+        `https://api.agentphone.ai/v1/conversations/${conv.id}/messages?limit=50`,
+        { headers: { Authorization: `Bearer ${AGENTPHONE_API_KEY}` } }
+      );
+      const { data: messages } = await msgRes.json();
+      if (messages && messages.length > 0) {
+        const latest = messages
+          .map((m) => m.receivedAt)
+          .sort()
+          .reverse()[0];
+        lastSeen[conv.id] = latest;
+        console.log(`Init: conv ${conv.id} → lastSeen ${latest}`);
+      }
+    }
+  } catch (e) {
+    console.error("Init error:", e.message);
+  }
+}
+
 async function poll() {
   try {
     const res = await fetch("https://api.agentphone.ai/v1/conversations?limit=20", {
@@ -243,12 +331,11 @@ async function poll() {
       const participant = conv.participant;
 
       const msgRes = await fetch(
-        `https://api.agentphone.ai/v1/conversations/${convId}/messages?limit=10`,
+        `https://api.agentphone.ai/v1/conversations/${convId}/messages?limit=20`,
         { headers: { Authorization: `Bearer ${AGENTPHONE_API_KEY}` } }
       );
       const { data: messages } = await msgRes.json();
 
-      // Find new inbound messages since we last checked
       const inbound = (messages || [])
         .filter((m) => m.direction === "inbound")
         .sort((a, b) => new Date(a.receivedAt) - new Date(b.receivedAt));
@@ -272,8 +359,10 @@ async function poll() {
 app.get("/", (req, res) => res.send("Gavel server running."));
 app.get("/webhook", (req, res) => res.send("Gavel webhook is live ✅"));
 
-app.listen(3000, () => {
+app.listen(3000, async () => {
   console.log("Gavel server running on http://localhost:3000");
-  console.log("Polling AgentPhone every 2.5s for new messages...\n");
+  console.log("Initializing — skipping old messages...");
+  await initLastSeen();
+  console.log("Ready! Polling for new messages every 2.5s\n");
   poll();
 });
