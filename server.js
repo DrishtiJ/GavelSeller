@@ -237,6 +237,15 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
   // Skip processing if no meaningful text and no image
   if (!t && !mediaUrl) return;
 
+  // "Start over" / "Hi" always resets the session
+  if (/^(start over|restart|reset|hi|hello|hey)\.?$/i.test(t) && session.state !== "start") {
+    session.state = "start";
+    session.data = { name: null, title: null, description: null, price: null, zip: null, category: null, images: [] };
+    await sendMessage(participant, "Hey! Welcome to Gavel 👋 Let's start fresh. What's your first name?");
+    await saveToConvex(conversationId, participant, session);
+    return;
+  }
+
   let reply = "";
 
   switch (session.state) {
@@ -263,29 +272,17 @@ async function handleMessage(conversationId, participant, text, mediaUrl) {
       mergeFields(session, extracted);
 
       // For the field we were specifically asking about, allow overwrite
-      if (session.state === "ask_item" && extracted.title) session.data.title = extracted.title;
-      if (session.state === "ask_description" && extracted.description) session.data.description = extracted.description;
-      if (session.state === "ask_price" && extracted.price) session.data.price = extracted.price;
-      if (session.state === "ask_zip" && extracted.zipCode) session.data.zip = extracted.zipCode;
-
-      // Check if the field we asked for is now filled
+      // Fall back to raw text if Gemini returned null
       const wasAsking = session.state;
-      const filled = {
-        ask_name: !!session.data.name,
-        ask_item: !!session.data.title,
-        ask_description: !!session.data.description,
-        ask_price: !!session.data.price,
-        ask_zip: !!session.data.zip,
-      };
-
-      if (!filled[wasAsking]) {
-        // Still missing — ask again
-        reply = buildNextQuestion(session, "I didn't quite catch that.");
-        break;
-      }
+      if (wasAsking === "ask_item") session.data.title = extracted.title || t;
+      if (wasAsking === "ask_description") session.data.description = extracted.description || t;
+      if (wasAsking === "ask_price") session.data.price = extracted.price || t;
+      if (wasAsking === "ask_zip") session.data.zip = extracted.zipCode || t;
+      if (wasAsking === "ask_name") session.data.name = extracted.name || t.split(" ")[0];
 
       // Advance to next missing field
       const next = nextMissingState(session);
+
       session.state = next;
 
       // Summarize what we got and what's still missing
